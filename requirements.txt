@@ -1,0 +1,8 @@
+numpy
+scipy
+mido
+pydub
+tensorflow
+torch
+pretty_midi
+# nesmdb
