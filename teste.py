@@ -10,6 +10,44 @@ from typing import Tuple, List, Optional
 import soundfile as sf
 import os
 
+MUSIC_STYLES = {
+    'NES Original': {
+        'pulse1_velocity': 100,
+        'pulse2_velocity': 80,
+        'triangle_velocity': 90,
+        'noise_velocity': 70,
+        'note_duration': {'pulse1': 240, 'pulse2': 240, 'triangle': 240, 'noise': 120}
+    },
+    'Rock': {
+        'pulse1_velocity': 120,  # Guitarra principal mais forte
+        'pulse2_velocity': 100,  # Guitarra base
+        'triangle_velocity': 110,  # Baixo mais presente
+        'noise_velocity': 100,  # Bateria mais forte
+        'note_duration': {'pulse1': 200, 'pulse2': 200, 'triangle': 280, 'noise': 160}
+    },
+    'Pop': {
+        'pulse1_velocity': 90,  # Melodia mais suave
+        'pulse2_velocity': 85,  # Harmonia equilibrada
+        'triangle_velocity': 85,  # Baixo moderado
+        'noise_velocity': 80,  # Batida pop
+        'note_duration': {'pulse1': 220, 'pulse2': 220, 'triangle': 220, 'noise': 140}
+    },
+    'Jazz': {
+        'pulse1_velocity': 85,  # Melodia jazz
+        'pulse2_velocity': 80,  # Acordes jazz
+        'triangle_velocity': 90,  # Walking bass
+        'noise_velocity': 60,  # Percussão suave
+        'note_duration': {'pulse1': 180, 'pulse2': 200, 'triangle': 160, 'noise': 100}
+    },
+    'Eletrônico': {
+        'pulse1_velocity': 110,  # Lead synth
+        'pulse2_velocity': 95,   # Pad/ambiente
+        'triangle_velocity': 100, # Bass synth
+        'noise_velocity': 90,    # Beats eletrônicos
+        'note_duration': {'pulse1': 160, 'pulse2': 300, 'triangle': 200, 'noise': 140}
+    }
+}
+
 def freq_to_midi_note(frequency: float) -> int:
     """Converte frequência em Hz para nota MIDI."""
     if frequency <= 0:
@@ -60,38 +98,6 @@ def detect_note_onsets(samples: np.ndarray, sr: int) -> np.ndarray:
     )
     return librosa.frames_to_time(onset_frames, sr=sr)
 
-def map_to_nes_channels(labels: np.ndarray, frequencies: np.ndarray, 
-                       magnitudes: np.ndarray) -> dict:
-    """Mapeia frequências para os canais específicos do NES."""
-    channels = {
-        'pulse1': [],  # Melodia principal
-        'pulse2': [],  # Harmonia/contramelodia
-        'triangle': [], # Baixo
-        'noise': []    # Percussão
-    }
-    
-    # Ordenar por magnitude
-    sorted_indices = np.argsort(magnitudes)[::-1]
-    
-    print(frequencies)
-    print(frequencies)
-    for idx in sorted_indices:
-        print(idx)
-        freq = frequencies[idx]
-        
-        # Mapeamento baseado em frequência
-        if freq < 60:  # Frequências muito baixas -> percussão
-            channels['noise'].append(freq)
-        elif freq < 250:  # Frequências baixas -> baixo
-            channels['triangle'].append(freq)
-        else:  # Distribuir entre os canais de pulso
-            if len(channels['pulse1']) <= len(channels['pulse2']):
-                channels['pulse1'].append(freq)
-            else:
-                channels['pulse2'].append(freq)
-    
-    return channels
-
 def quantize_timing(onset_times: np.ndarray, bpm: float) -> np.ndarray:
     """Quantiza o timing das notas para o grid do NES."""
     # NES usa 24 pulsos por quarto de nota
@@ -104,33 +110,59 @@ def quantize_timing(onset_times: np.ndarray, bpm: float) -> np.ndarray:
     
     return quantized_times
 
-def create_nes_midi(channels: dict, onset_times: np.ndarray, 
-                    output_file: str, bpm: float = 120.0) -> None:
-    """Cria arquivo MIDI com os canais do NES."""
+def create_nes_midi(notes: List[dict], output_file: str, style: str = 'NES Original') -> None:
+    """Cria arquivo MIDI no estilo selecionado."""
     midi = MidiFile()
+    style_params = MUSIC_STYLES[style]
     
-    # Configurar tempo
-    tempo = int(60000000 / bpm)  # Microssegundos por batida
+    # Criar tracks para cada canal
+    tracks = {
+        'pulse1': MidiTrack(),  # Melodia principal
+        'pulse2': MidiTrack(),  # Harmonia
+        'triangle': MidiTrack(), # Baixo
+        'noise': MidiTrack()    # Percussão
+    }
     
-    for channel_name, frequencies in channels.items():
-        track = MidiTrack()
+    for track in tracks.values():
         midi.tracks.append(track)
+    
+    # Normalizar magnitudes
+    max_mag = max(note['magnitude'] for note in notes) if notes else 1
+    notes.sort(key=lambda x: x['time'])
+    
+    last_times = {name: 0 for name in tracks}
+    
+    for note in notes:
+        freq = note['frequency']
+        midi_note = freq_to_midi_note(freq)
         
-        # Configurar nome do canal
-        track.append(Message('track_name', name=channel_name, time=0))
-
-        # Converter frequências para notas MIDI
-        for freq in frequencies:
-            note = freq_to_midi_note(freq)
-            if 0 <= note <= 127:  # Notas MIDI válidas
-                # Note On
-                track.append(Message('note_on', note=note, 
-                                   velocity=100 if channel_name != 'noise' else 64,
-                                   time=0))
-                # Note Off (após 1/4 de nota)
-                track.append(Message('note_off', note=note, 
-                                   velocity=64,
-                                   time=480))  # 480 ticks = 1/4 nota
+        if not (0 <= midi_note <= 127):
+            continue
+        
+        # Selecionar canal e ajustar velocidade baseado no estilo
+        if freq < 65:
+            channel = 'noise'
+            velocity = int(min(127, (note['magnitude'] / max_mag) * style_params['noise_velocity']))
+        elif freq < 262:
+            channel = 'triangle'
+            velocity = int(min(127, (note['magnitude'] / max_mag) * style_params['triangle_velocity']))
+        else:
+            channel = 'pulse1' if freq % 2 == 0 else 'pulse2'
+            velocity = int(min(127, (note['magnitude'] / max_mag) * 
+                           style_params[f'{channel}_velocity']))
+        
+        track = tracks[channel]
+        current_time = int(note['time'] * 1000)
+        delta = max(0, current_time - last_times[channel])
+        last_times[channel] = current_time
+        
+        # Adicionar nota com velocidade e duração específicas do estilo
+        track.append(Message('note_on', note=midi_note, 
+                           velocity=max(1, velocity), time=delta))
+        
+        duration = style_params['note_duration'][channel]
+        track.append(Message('note_off', note=midi_note, 
+                           velocity=64, time=duration))
     
     midi.save(output_file)
 
@@ -277,75 +309,6 @@ def extract_notes(pitches: np.ndarray, magnitudes: np.ndarray, onset_times: np.n
     
     return notes
 
-def create_nes_midi(notes: List[dict], output_file: str, target_bpm: Optional[float] = None) -> None:
-    """Cria arquivo MIDI no estilo NES."""
-    midi = MidiFile()
-    
-    # Criar tracks para cada canal do NES
-    tracks = {
-        'pulse1': MidiTrack(),  # Melodia principal
-        'pulse2': MidiTrack(),  # Harmonia
-        'triangle': MidiTrack(), # Baixo
-        'noise': MidiTrack()    # Percussão
-    }
-    
-    for track in tracks.values():
-        midi.tracks.append(track)
-    
-    # Configurar tempo se BPM foi especificado
-    if target_bpm:
-        tempo = int(60000000 / target_bpm)  # Microssegundos por batida
-    
-    # Normalizar magnitudes
-    max_mag = max(note['magnitude'] for note in notes) if notes else 1
-    
-    # Ordenar notas por tempo
-    notes.sort(key=lambda x: x['time'])
-    
-    # Ajustar tempos se BPM foi especificado
-    if target_bpm:
-        tempo_scale = 120 / target_bpm  # Fator de escala do tempo
-        for note in notes:
-            note['time'] *= tempo_scale
-    
-    # Distribuir notas pelos canais
-    last_times = {name: 0 for name in tracks}
-    
-    for note in notes:
-        freq = note['frequency']
-        midi_note = freq_to_midi_note(freq)
-        velocity = int(min(127, (note['magnitude'] / max_mag) * 127))
-        
-        if not (0 <= midi_note <= 127):
-            continue
-        
-        # Selecionar canal baseado na frequência
-        if freq < 65:  # Abaixo de C2
-            channel = 'noise'
-        elif freq < 262:  # Abaixo de C4
-            channel = 'triangle'
-        else:
-            # Alternar entre pulse1 e pulse2 para notas mais altas
-            channel = 'pulse1' if freq % 2 == 0 else 'pulse2'
-        
-        track = tracks[channel]
-        
-        # Calcular delta time
-        current_time = int(note['time'] * 1000)  # Converter para milissegundos
-        delta = max(0, current_time - last_times[channel])
-        last_times[channel] = current_time
-        
-        # Adicionar nota
-        track.append(Message('note_on', note=midi_note, 
-                           velocity=max(1, velocity), time=delta))
-        
-        # Duração da nota baseada no canal
-        duration = 120 if channel == 'noise' else 240
-        track.append(Message('note_off', note=midi_note, 
-                           velocity=64, time=duration))
-    
-    midi.save(output_file)
-
 def analyze_spectral(samples: np.ndarray, sr: int) -> None:
     """Analisa e mostra o espectrograma do áudio."""
     # Criar espectrograma
@@ -421,6 +384,7 @@ def main():
         try:
             output_file = os.path.splitext(input_file)[0] + "_nes.mid"
             show_spectral = spectral_var.get()
+            selected_style = style_var.get()
             
             status_label.config(text="Convertendo...")
             root.update()
@@ -428,15 +392,14 @@ def main():
             # Carregar e processar áudio
             samples, sr = load_audio(input_file)
             
-            # Mostrar análise espectral se solicitado
             if show_spectral:
                 analyze_spectral(samples, sr)
             
             onset_times, pitches, magnitudes = analyze_audio(samples, sr)
             notes = extract_notes(pitches, magnitudes, onset_times)
             
-            # Criar MIDI
-            create_nes_midi(notes, output_file)
+            # Criar MIDI com estilo selecionado
+            create_nes_midi(notes, output_file, style=selected_style)
             
             status_label.config(text="Conversão concluída!")
             play_button.config(state=tk.NORMAL)
@@ -462,6 +425,13 @@ def main():
     spectral_var = tk.BooleanVar()
     ttk.Checkbutton(frame, text="Mostrar Análise Espectral", 
                     variable=spectral_var).grid(row=2, column=2)
+    
+    ttk.Label(frame, text="Estilo Musical:").grid(row=2, column=0, sticky=tk.W)
+    style_var = tk.StringVar(value='NES Original')
+    style_combo = ttk.Combobox(frame, textvariable=style_var, 
+                              values=list(MUSIC_STYLES.keys()),
+                              state='readonly', width=15)
+    style_combo.grid(row=2, column=1, sticky=tk.W)
     
     ttk.Button(frame, text="Converter", 
                command=convert).grid(row=3, column=0)
